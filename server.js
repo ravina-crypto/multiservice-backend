@@ -2,6 +2,7 @@ const express = require("express");
 const Razorpay = require("razorpay");
 const cors = require("cors");
 const admin = require("firebase-admin");
+const axios = require("axios");
 
 require("dotenv").config();
 
@@ -12,7 +13,7 @@ app.use(express.json());
 // ✅ Initialize Firebase Admin SDK
 if (!admin.apps.length) {
   admin.initializeApp({
-    credential: admin.credential.applicationDefault(), // or use serviceAccountKey.json
+    credential: admin.credential.applicationDefault(), // or serviceAccountKey.json
   });
 }
 const db = admin.firestore();
@@ -44,7 +45,49 @@ app.post("/order", async (req, res) => {
   }
 });
 
-// ✅ Create new tailoring order (Customer places order)
+// ✅ Verify Razorpay Payment & Update Firestore Order
+app.post("/payment/verify", async (req, res) => {
+  try {
+    const { orderId, paymentId, signature, customerId } = req.body;
+
+    if (!paymentId) {
+      return res.status(400).json({ error: "Invalid payment" });
+    }
+
+    // Find pending payment order for this customer
+    const snapshot = await db
+      .collection("orders")
+      .where("customerId", "==", customerId)
+      .where("status", "==", "PendingPayment")
+      .get();
+
+    if (snapshot.empty) {
+      return res.status(404).json({ error: "Order not found for update" });
+    }
+
+    const orderDoc = snapshot.docs[0].ref;
+
+    // Update status after successful payment
+    await orderDoc.update({
+      status: "Pending", // Tailor can start now
+      paymentId,
+    });
+
+    // Notify user
+    await axios.post(`${process.env.NOTIFY_URL}/notify`, {
+      userId: customerId,
+      title: "💳 Payment Successful",
+      body: "Your payment was received! Tailor will start soon.",
+    });
+
+    res.json({ success: true, message: "Payment verified & order updated" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Payment verification failed" });
+  }
+});
+
+// ✅ Create new tailoring order
 app.post("/orders", async (req, res) => {
   try {
     const { customerId, service, amount, address } = req.body;
@@ -54,7 +97,7 @@ app.post("/orders", async (req, res) => {
       service,
       amount,
       address,
-      status: "Pending", // default
+      status: "PendingPayment", // First wait for payment
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     };
 
@@ -66,7 +109,7 @@ app.post("/orders", async (req, res) => {
   }
 });
 
-// ✅ Fetch all orders (Tailor/Delivery will use this)
+// ✅ Fetch all orders (Tailor/Delivery use this)
 app.get("/orders", async (req, res) => {
   try {
     const snapshot = await db.collection("orders").get();
@@ -101,7 +144,7 @@ app.get("/orders/customer/:customerId", async (req, res) => {
   }
 });
 
-// ✅ Update order status (Tailor/Delivery will use this)
+// ✅ Update order status (Tailor/Delivery use this)
 app.put("/orders/:id", async (req, res) => {
   try {
     const { status } = req.body;
@@ -116,7 +159,7 @@ app.put("/orders/:id", async (req, res) => {
   }
 });
 
-// ✅ Notify customer (Push Notification via Firebase FCM)
+// ✅ Notify customer via FCM
 app.post("/notify", async (req, res) => {
   try {
     const { userId, title, body } = req.body;
@@ -125,7 +168,7 @@ app.post("/notify", async (req, res) => {
       return res.status(400).json({ error: "Missing fields" });
     }
 
-    // Fetch customer’s FCM token from Firestore
+    // Fetch customer's FCM token
     const userDoc = await db.collection("users").doc(userId).get();
     if (!userDoc.exists || !userDoc.data().fcmToken) {
       return res.status(404).json({ error: "No FCM token found for user" });
@@ -133,7 +176,6 @@ app.post("/notify", async (req, res) => {
 
     const fcmToken = userDoc.data().fcmToken;
 
-    // Send notification
     const message = {
       token: fcmToken,
       notification: {
@@ -146,11 +188,11 @@ app.post("/notify", async (req, res) => {
 
     res.json({ success: true, message: "📩 Notification sent!" });
   } catch (error) {
-    console.error("❌ Error sending notification:", error);
+    console.error(error);
     res.status(500).json({ error: "Failed to send notification" });
   }
 });
 
 // ✅ Start server
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
