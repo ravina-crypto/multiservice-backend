@@ -2,7 +2,7 @@ const express = require("express");
 const Razorpay = require("razorpay");
 const cors = require("cors");
 const admin = require("firebase-admin");
-const axios = require("axios");
+const crypto = require("crypto");
 
 require("dotenv").config();
 
@@ -10,7 +10,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ✅ Initialize Firebase Admin SDK
+// 🔹 Initialize Firebase Admin SDK
 if (!admin.apps.length) {
   admin.initializeApp({
     credential: admin.credential.applicationDefault(), // or serviceAccountKey.json
@@ -18,7 +18,7 @@ if (!admin.apps.length) {
 }
 const db = admin.firestore();
 
-// ✅ Razorpay instance
+// 🔹 Razorpay instance
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
   key_secret: process.env.RAZORPAY_KEY_SECRET,
@@ -45,45 +45,32 @@ app.post("/order", async (req, res) => {
   }
 });
 
-// ✅ Verify Razorpay Payment & Update Firestore Order
+// ✅ Verify Razorpay Payment
 app.post("/payment/verify", async (req, res) => {
   try {
-    const { orderId, paymentId, signature, customerId } = req.body;
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, orderId } = req.body;
 
-    if (!paymentId) {
-      return res.status(400).json({ error: "Invalid payment" });
+    const sign = razorpay_order_id + "|" + razorpay_payment_id;
+    const expectedSign = crypto
+      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+      .update(sign.toString())
+      .digest("hex");
+
+    if (razorpay_signature === expectedSign) {
+      // ✅ Update Firestore order to Pending
+      if (orderId) {
+        await db.collection("orders").doc(orderId).update({
+          status: "Pending",
+          paymentId: razorpay_payment_id,
+        });
+      }
+      res.json({ success: true, message: "Payment verified successfully!" });
+    } else {
+      res.json({ success: false, message: "Payment verification failed!" });
     }
-
-    // Find pending payment order for this customer
-    const snapshot = await db
-      .collection("orders")
-      .where("customerId", "==", customerId)
-      .where("status", "==", "PendingPayment")
-      .get();
-
-    if (snapshot.empty) {
-      return res.status(404).json({ error: "Order not found for update" });
-    }
-
-    const orderDoc = snapshot.docs[0].ref;
-
-    // Update status after successful payment
-    await orderDoc.update({
-      status: "Pending", // Tailor can start now
-      paymentId,
-    });
-
-    // Notify user
-    await axios.post(`${process.env.NOTIFY_URL}/notify`, {
-      userId: customerId,
-      title: "💳 Payment Successful",
-      body: "Your payment was received! Tailor will start soon.",
-    });
-
-    res.json({ success: true, message: "Payment verified & order updated" });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Payment verification failed" });
+    console.error("Verification error:", error);
+    res.status(500).json({ success: false, error: "Server error during verification" });
   }
 });
 
@@ -97,7 +84,7 @@ app.post("/orders", async (req, res) => {
       service,
       amount,
       address,
-      status: "PendingPayment", // First wait for payment
+      status: "Pending", // Default
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     };
 
@@ -109,7 +96,7 @@ app.post("/orders", async (req, res) => {
   }
 });
 
-// ✅ Fetch all orders (Tailor/Delivery use this)
+// ✅ Fetch all orders (Tailor/Delivery)
 app.get("/orders", async (req, res) => {
   try {
     const snapshot = await db.collection("orders").get();
@@ -124,7 +111,7 @@ app.get("/orders", async (req, res) => {
   }
 });
 
-// ✅ Fetch orders of a specific customer
+// ✅ Fetch specific customer orders
 app.get("/orders/customer/:customerId", async (req, res) => {
   try {
     const snapshot = await db
@@ -136,7 +123,6 @@ app.get("/orders/customer/:customerId", async (req, res) => {
       id: doc.id,
       ...doc.data(),
     }));
-
     res.json(orders);
   } catch (error) {
     console.error(error);
@@ -144,14 +130,13 @@ app.get("/orders/customer/:customerId", async (req, res) => {
   }
 });
 
-// ✅ Update order status (Tailor/Delivery use this)
+// ✅ Update order status (Tailor/Delivery)
 app.put("/orders/:id", async (req, res) => {
   try {
     const { status } = req.body;
     const orderRef = db.collection("orders").doc(req.params.id);
 
     await orderRef.update({ status });
-
     res.json({ id: req.params.id, status });
   } catch (error) {
     console.error(error);
@@ -159,16 +144,15 @@ app.put("/orders/:id", async (req, res) => {
   }
 });
 
-// ✅ Notify customer via FCM
+// ✅ Notify customer via FCM (future push notifications)
 app.post("/notify", async (req, res) => {
   try {
     const { userId, title, body } = req.body;
-
     if (!userId || !title || !body) {
       return res.status(400).json({ error: "Missing fields" });
     }
 
-    // Fetch customer's FCM token
+    // Fetch customer's FCM token from Firestore
     const userDoc = await db.collection("users").doc(userId).get();
     if (!userDoc.exists || !userDoc.data().fcmToken) {
       return res.status(404).json({ error: "No FCM token found for user" });
@@ -176,23 +160,20 @@ app.post("/notify", async (req, res) => {
 
     const fcmToken = userDoc.data().fcmToken;
 
+    // Send notification
     const message = {
       token: fcmToken,
-      notification: {
-        title,
-        body,
-      },
+      notification: { title, body },
     };
 
     await admin.messaging().send(message);
-
-    res.json({ success: true, message: "📩 Notification sent!" });
+    res.json({ success: true, message: "📢 Notification sent!" });
   } catch (error) {
-    console.error(error);
+    console.error("Error sending notification:", error);
     res.status(500).json({ error: "Failed to send notification" });
   }
 });
 
 // ✅ Start server
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
