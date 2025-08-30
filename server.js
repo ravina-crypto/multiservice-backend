@@ -1,179 +1,191 @@
-const express = require("express");
-const Razorpay = require("razorpay");
-const cors = require("cors");
-const admin = require("firebase-admin");
-const crypto = require("crypto");
+// server.js (multiservice-backend)
 
-require("dotenv").config();
+import express from "express";
+import bodyParser from "body-parser";
+import cors from "cors";
+import Razorpay from "razorpay";
+import admin from "firebase-admin";
+import dotenv from "dotenv";
 
+dotenv.config();
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(bodyParser.json());
 
-// 🔹 Initialize Firebase Admin SDK
+// ✅ Initialize Firebase Admin SDK
+import serviceAccount from "./firebase/serviceAccountKey.json" assert { type: "json" };
+
 if (!admin.apps.length) {
   admin.initializeApp({
-    credential: admin.credential.applicationDefault(), // or serviceAccountKey.json
+    credential: admin.credential.cert(serviceAccount),
   });
 }
+
 const db = admin.firestore();
 
-// 🔹 Razorpay instance
+// ✅ Razorpay instance
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
   key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
-// ✅ Health check
-app.get("/", (req, res) => {
-  res.send("✅ Backend running successfully!");
+// ------------------- WALLET APIs -------------------
+
+// Add money to wallet
+app.post("/wallet/add", async (req, res) => {
+  try {
+    const { userId, amount } = req.body;
+    const walletRef = db.collection("wallets").doc(userId);
+
+    await walletRef.set(
+      {
+        balance: admin.firestore.FieldValue.increment(amount),
+        transactions: admin.firestore.FieldValue.arrayUnion({
+          type: "credit",
+          amount,
+          timestamp: new Date(),
+        }),
+      },
+      { merge: true }
+    );
+
+    res.json({ success: true, message: "Money added to wallet" });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
-// ✅ Create Razorpay order
+// Pay with wallet
+app.post("/wallet/pay", async (req, res) => {
+  try {
+    const { userId, amount } = req.body;
+    const walletRef = db.collection("wallets").doc(userId);
+    const walletDoc = await walletRef.get();
+
+    if (!walletDoc.exists || walletDoc.data().balance < amount) {
+      return res.status(400).json({ success: false, message: "Insufficient balance" });
+    }
+
+    await walletRef.update({
+      balance: admin.firestore.FieldValue.increment(-amount),
+      transactions: admin.firestore.FieldValue.arrayUnion({
+        type: "debit",
+        amount,
+        timestamp: new Date(),
+      }),
+    });
+
+    res.json({ success: true, message: "Payment successful via wallet" });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Get wallet history
+app.get("/wallet/:userId", async (req, res) => {
+  try {
+    const walletDoc = await db.collection("wallets").doc(req.params.userId).get();
+    res.json(walletDoc.exists ? walletDoc.data() : { balance: 0, transactions: [] });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ------------------- ORDER APIs -------------------
+
+// Create new order
+app.post("/orders", async (req, res) => {
+  try {
+    const { customerId, service, amount, address } = req.body;
+    const orderRef = db.collection("orders").doc();
+
+    await orderRef.set({
+      id: orderRef.id,
+      customerId,
+      service,
+      amount,
+      address,
+      status: "PendingPayment",
+      createdAt: new Date(),
+    });
+
+    res.json({ success: true, orderId: orderRef.id });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Update order status
+app.post("/orders/update", async (req, res) => {
+  try {
+    const { orderId, status } = req.body;
+    const orderRef = db.collection("orders").doc(orderId);
+
+    await orderRef.update({ status });
+    res.json({ success: true, message: "Order status updated" });
+
+    // ✅ Send push notification
+    const orderDoc = await orderRef.get();
+    const customerId = orderDoc.data().customerId;
+    const userDoc = await db.collection("users").doc(customerId).get();
+
+    if (userDoc.exists && userDoc.data().fcmToken) {
+      await admin.messaging().send({
+        token: userDoc.data().fcmToken,
+        notification: {
+          title: "Order Update",
+          body: `Your order is now ${status}`,
+        },
+      });
+    }
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ------------------- PAYMENT APIs -------------------
+
+// Create Razorpay order
 app.post("/order", async (req, res) => {
   try {
     const options = {
-      amount: req.body.amount * 100, // in paise
+      amount: req.body.amount * 100, // amount in paise
       currency: "INR",
       receipt: "receipt_" + Date.now(),
     };
     const order = await razorpay.orders.create(options);
     res.json(order);
-  } catch (error) {
-    console.error(error);
-    res.status(500).send("Error creating Razorpay order");
+  } catch (err) {
+    res.status(500).send(err);
   }
 });
 
-// ✅ Verify Razorpay Payment
+// Verify payment
 app.post("/payment/verify", async (req, res) => {
   try {
-    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, orderId } = req.body;
+    const { orderId, paymentId, signature, customerId } = req.body;
 
-    const sign = razorpay_order_id + "|" + razorpay_payment_id;
-    const expectedSign = crypto
-      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
-      .update(sign.toString())
-      .digest("hex");
-
-    if (razorpay_signature === expectedSign) {
-      // ✅ Update Firestore order to Pending
-      if (orderId) {
-        await db.collection("orders").doc(orderId).update({
-          status: "Pending",
-          paymentId: razorpay_payment_id,
-        });
-      }
-      res.json({ success: true, message: "Payment verified successfully!" });
-    } else {
-      res.json({ success: false, message: "Payment verification failed!" });
-    }
-  } catch (error) {
-    console.error("Verification error:", error);
-    res.status(500).json({ success: false, error: "Server error during verification" });
-  }
-});
-
-// ✅ Create new tailoring order
-app.post("/orders", async (req, res) => {
-  try {
-    const { customerId, service, amount, address } = req.body;
-
-    const newOrder = {
+    // Save payment record
+    await db.collection("payments").doc(paymentId).set({
+      orderId,
+      paymentId,
+      signature,
       customerId,
-      service,
-      amount,
-      address,
-      status: "Pending", // Default
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    };
+      status: "verified",
+      createdAt: new Date(),
+    });
 
-    const docRef = await db.collection("orders").add(newOrder);
-    res.json({ id: docRef.id, ...newOrder });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Error creating order" });
+    // Update order status
+    await db.collection("orders").doc(orderId).update({
+      status: "Paid",
+    });
+
+    res.json({ success: true, message: "Payment verified" });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// ✅ Fetch all orders (Tailor/Delivery)
-app.get("/orders", async (req, res) => {
-  try {
-    const snapshot = await db.collection("orders").get();
-    const orders = snapshot.docs.map((doc) => ({
-      id: doc.id,
-      ...doc.data(),
-    }));
-    res.json(orders);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Error fetching orders" });
-  }
-});
-
-// ✅ Fetch specific customer orders
-app.get("/orders/customer/:customerId", async (req, res) => {
-  try {
-    const snapshot = await db
-      .collection("orders")
-      .where("customerId", "==", req.params.customerId)
-      .get();
-
-    const orders = snapshot.docs.map((doc) => ({
-      id: doc.id,
-      ...doc.data(),
-    }));
-    res.json(orders);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Error fetching customer orders" });
-  }
-});
-
-// ✅ Update order status (Tailor/Delivery)
-app.put("/orders/:id", async (req, res) => {
-  try {
-    const { status } = req.body;
-    const orderRef = db.collection("orders").doc(req.params.id);
-
-    await orderRef.update({ status });
-    res.json({ id: req.params.id, status });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Error updating order status" });
-  }
-});
-
-// ✅ Notify customer via FCM (future push notifications)
-app.post("/notify", async (req, res) => {
-  try {
-    const { userId, title, body } = req.body;
-    if (!userId || !title || !body) {
-      return res.status(400).json({ error: "Missing fields" });
-    }
-
-    // Fetch customer's FCM token from Firestore
-    const userDoc = await db.collection("users").doc(userId).get();
-    if (!userDoc.exists || !userDoc.data().fcmToken) {
-      return res.status(404).json({ error: "No FCM token found for user" });
-    }
-
-    const fcmToken = userDoc.data().fcmToken;
-
-    // Send notification
-    const message = {
-      token: fcmToken,
-      notification: { title, body },
-    };
-
-    await admin.messaging().send(message);
-    res.json({ success: true, message: "📢 Notification sent!" });
-  } catch (error) {
-    console.error("Error sending notification:", error);
-    res.status(500).json({ error: "Failed to send notification" });
-  }
-});
-
-// ✅ Start server
+// ------------------- START SERVER -------------------
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Backend running on port ${PORT}`));
