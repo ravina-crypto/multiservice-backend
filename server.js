@@ -9,7 +9,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// 🔹 Initialize Firebase Admin SDK
+// ✅ Initialize Firebase Admin SDK
 if (!admin.apps.length) {
   admin.initializeApp({
     credential: admin.credential.applicationDefault(), // or use serviceAccountKey.json
@@ -17,7 +17,7 @@ if (!admin.apps.length) {
 }
 const db = admin.firestore();
 
-// 🔹 Razorpay instance
+// ✅ Razorpay instance
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
   key_secret: process.env.RAZORPAY_KEY_SECRET,
@@ -59,7 +59,6 @@ app.post("/orders", async (req, res) => {
     };
 
     const docRef = await db.collection("orders").add(newOrder);
-
     res.json({ id: docRef.id, ...newOrder });
   } catch (error) {
     console.error(error);
@@ -94,6 +93,7 @@ app.get("/orders/customer/:customerId", async (req, res) => {
       id: doc.id,
       ...doc.data(),
     }));
+
     res.json(orders);
   } catch (error) {
     console.error(error);
@@ -116,6 +116,41 @@ app.put("/orders/:id", async (req, res) => {
   }
 });
 
+// ✅ Notify customer (Push Notification via Firebase FCM)
+app.post("/notify", async (req, res) => {
+  try {
+    const { userId, title, body } = req.body;
+
+    if (!userId || !title || !body) {
+      return res.status(400).json({ error: "Missing fields" });
+    }
+
+    // Fetch customer’s FCM token from Firestore
+    const userDoc = await db.collection("users").doc(userId).get();
+    if (!userDoc.exists || !userDoc.data().fcmToken) {
+      return res.status(404).json({ error: "No FCM token found for user" });
+    }
+
+    const fcmToken = userDoc.data().fcmToken;
+
+    // Send notification
+    const message = {
+      token: fcmToken,
+      notification: {
+        title,
+        body,
+      },
+    };
+
+    await admin.messaging().send(message);
+
+    res.json({ success: true, message: "📩 Notification sent!" });
+  } catch (error) {
+    console.error("❌ Error sending notification:", error);
+    res.status(500).json({ error: "Failed to send notification" });
+  }
+});
+
 // ✅ Start server
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
