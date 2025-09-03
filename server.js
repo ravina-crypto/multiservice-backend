@@ -12,7 +12,7 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// ✅ Initialize Firebase Admin SDK with ENV vars
+// ✅ Initialize Firebase Admin SDK
 if (!admin.apps.length) {
   admin.initializeApp({
     credential: admin.credential.cert({
@@ -31,10 +31,9 @@ const razorpay = new Razorpay({
   key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
+// ------------------- WALLET APIS -------------------
 
-// ---------------- WALLET APIs ----------------
-
-// ➕ Add money to wallet
+// Add money to wallet
 app.post("/wallet/add", async (req, res) => {
   try {
     const { userId, amount } = req.body;
@@ -52,13 +51,13 @@ app.post("/wallet/add", async (req, res) => {
       { merge: true }
     );
 
-    res.json({ success: true, message: "Money added to wallet ✅" });
+    res.json({ success: true, message: "Money added to wallet" });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// 💳 Pay with wallet
+// Pay with wallet
 app.post("/wallet/pay", async (req, res) => {
   try {
     const { userId, amount } = req.body;
@@ -68,7 +67,7 @@ app.post("/wallet/pay", async (req, res) => {
     if (!walletDoc.exists || walletDoc.data().balance < amount) {
       return res
         .status(400)
-        .json({ success: false, message: "Insufficient balance ❌" });
+        .json({ success: false, message: "Insufficient balance" });
     }
 
     await walletRef.update({
@@ -80,29 +79,29 @@ app.post("/wallet/pay", async (req, res) => {
       }),
     });
 
-    res.json({ success: true, message: "Payment successful via wallet ✅" });
+    res.json({ success: true, message: "Payment successful via wallet" });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// 📜 Wallet history
+// Wallet history
 app.get("/wallet/:userId", async (req, res) => {
   try {
     const walletDoc = await db
       .collection("wallets")
       .doc(req.params.userId)
       .get();
+
     res.json(walletDoc.exists ? walletDoc.data() : { balance: 0, transactions: [] });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
+// ------------------- ORDER APIS -------------------
 
-// ---------------- ORDER APIs ----------------
-
-// ➕ Create new order
+// Create new order
 app.post("/orders", async (req, res) => {
   try {
     const { customerId, service, amount, address } = req.body;
@@ -124,12 +123,11 @@ app.post("/orders", async (req, res) => {
   }
 });
 
-// 🔄 Update order
+// Update order + push notification
 app.post("/orders/update", async (req, res) => {
   try {
     const { orderId, status } = req.body;
     const orderRef = db.collection("orders").doc(orderId);
-
     await orderRef.update({ status });
 
     // Push notification
@@ -147,31 +145,30 @@ app.post("/orders/update", async (req, res) => {
       });
     }
 
-    res.json({ success: true, message: "Order status updated ✅" });
+    res.json({ success: true, message: "Order status updated" });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
+// ------------------- PAYMENT APIS -------------------
 
-// ---------------- PAYMENT APIs ----------------
-
-// 💰 Create Razorpay order
-app.post("/payment/order", async (req, res) => {
+// Create Razorpay order
+app.post("/order", async (req, res) => {
   try {
     const options = {
-      amount: req.body.amount * 100, // amount in paise
+      amount: req.body.amount * 100, // in paise
       currency: "INR",
       receipt: "receipt_" + Date.now(),
     };
     const order = await razorpay.orders.create(options);
     res.json(order);
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    res.status(500).send(err);
   }
 });
 
-// ✅ Verify payment
+// Verify payment
 app.post("/payment/verify", async (req, res) => {
   try {
     const { orderId, paymentId, signature, customerId } = req.body;
@@ -189,20 +186,13 @@ app.post("/payment/verify", async (req, res) => {
     // Update order status
     await db.collection("orders").doc(orderId).update({ status: "Paid" });
 
-    res.json({ success: true, message: "Payment verified ✅" });
+    res.json({ success: true, message: "Payment verified" });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-
-// ---------------- HEALTH CHECK ----------------
-app.get("/", (req, res) => {
-  res.json({ status: "ok", message: "Backend is running ✅" });
-});
-
-
-// ---------------- START SERVER ----------------
+// ------------------- START SERVER -------------------
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () =>
   console.log(`🚀 Backend running on port ${PORT}`)
