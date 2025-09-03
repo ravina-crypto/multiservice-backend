@@ -18,7 +18,6 @@ if (!admin.apps.length) {
     credential: admin.credential.cert({
       projectId: process.env.FIREBASE_PROJECT_ID,
       clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-      // fix for escaped key
       privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"),
     }),
   });
@@ -183,6 +182,52 @@ app.post("/payment/verify", async (req, res) => {
     res.json({ success: true, message: "Payment verified" });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------- AUTH APIs ----------------
+
+// Signup
+app.post("/signup", async (req, res) => {
+  try {
+    const { email, password, role } = req.body;
+
+    const userRecord = await admin.auth().createUser({
+      email,
+      password,
+    });
+
+    await db.collection("users").doc(userRecord.uid).set({
+      email,
+      role,
+      createdAt: new Date(),
+    });
+
+    res.json({ success: true, userId: userRecord.uid });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Login
+app.post("/login", async (req, res) => {
+  try {
+    const { idToken } = req.body;
+
+    const decodedToken = await admin.auth().verifyIdToken(idToken);
+    const userDoc = await db.collection("users").doc(decodedToken.uid).get();
+
+    if (!userDoc.exists) {
+      return res.status(404).json({ success: false, error: "User not found" });
+    }
+
+    res.json({
+      success: true,
+      userId: decodedToken.uid,
+      role: userDoc.data().role,
+    });
+  } catch (err) {
+    res.status(401).json({ success: false, error: "Invalid token" });
   }
 });
 
