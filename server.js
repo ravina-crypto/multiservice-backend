@@ -18,6 +18,7 @@ if (!admin.apps.length) {
     credential: admin.credential.cert({
       projectId: process.env.FIREBASE_PROJECT_ID,
       clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+      // fix for escaped key
       privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"),
     }),
   });
@@ -31,14 +32,13 @@ const razorpay = new Razorpay({
   key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
-// ------------------- WALLET APIS -------------------
+// ---------------- WALLET APIs ----------------
 
-// Add money to wallet
+// Add money
 app.post("/wallet/add", async (req, res) => {
   try {
     const { userId, amount } = req.body;
     const walletRef = db.collection("wallets").doc(userId);
-
     await walletRef.set(
       {
         balance: admin.firestore.FieldValue.increment(amount),
@@ -50,7 +50,6 @@ app.post("/wallet/add", async (req, res) => {
       },
       { merge: true }
     );
-
     res.json({ success: true, message: "Money added to wallet" });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -88,18 +87,14 @@ app.post("/wallet/pay", async (req, res) => {
 // Wallet history
 app.get("/wallet/:userId", async (req, res) => {
   try {
-    const walletDoc = await db
-      .collection("wallets")
-      .doc(req.params.userId)
-      .get();
-
+    const walletDoc = await db.collection("wallets").doc(req.params.userId).get();
     res.json(walletDoc.exists ? walletDoc.data() : { balance: 0, transactions: [] });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// ------------------- ORDER APIS -------------------
+// ---------------- ORDER APIs ----------------
 
 // Create new order
 app.post("/orders", async (req, res) => {
@@ -123,14 +118,15 @@ app.post("/orders", async (req, res) => {
   }
 });
 
-// Update order + push notification
+// Update order
 app.post("/orders/update", async (req, res) => {
   try {
     const { orderId, status } = req.body;
     const orderRef = db.collection("orders").doc(orderId);
+
     await orderRef.update({ status });
 
-    // Push notification
+    // push notification if FCM token exists
     const orderDoc = await orderRef.get();
     const customerId = orderDoc.data().customerId;
     const userDoc = await db.collection("users").doc(customerId).get();
@@ -151,7 +147,7 @@ app.post("/orders/update", async (req, res) => {
   }
 });
 
-// ------------------- PAYMENT APIS -------------------
+// ---------------- PAYMENT APIs ----------------
 
 // Create Razorpay order
 app.post("/order", async (req, res) => {
@@ -173,7 +169,6 @@ app.post("/payment/verify", async (req, res) => {
   try {
     const { orderId, paymentId, signature, customerId } = req.body;
 
-    // Save payment record
     await db.collection("payments").doc(paymentId).set({
       orderId,
       paymentId,
@@ -183,7 +178,6 @@ app.post("/payment/verify", async (req, res) => {
       createdAt: new Date(),
     });
 
-    // Update order status
     await db.collection("orders").doc(orderId).update({ status: "Paid" });
 
     res.json({ success: true, message: "Payment verified" });
@@ -192,7 +186,8 @@ app.post("/payment/verify", async (req, res) => {
   }
 });
 
-// ------------------- START SERVER -------------------
+// ---------------- START SERVER ----------------
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () =>
   console.log(`🚀 Backend running on port ${PORT}`)
