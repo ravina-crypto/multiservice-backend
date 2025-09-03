@@ -14,13 +14,20 @@ app.use(bodyParser.json());
 
 // ✅ Initialize Firebase Admin SDK with ENV vars
 if (!admin.apps.length) {
-  admin.initializeApp({
-    credential: admin.credential.cert({
-      projectId: process.env.FIREBASE_PROJECT_ID,
-      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-      privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"),
-    }),
-  });
+  try {
+    admin.initializeApp({
+      credential: admin.credential.cert({
+        projectId: process.env.FIREBASE_PROJECT_ID,
+        clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+        privateKey: process.env.FIREBASE_PRIVATE_KEY
+          ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n')
+          : undefined,
+      }),
+    });
+    console.log("✅ Firebase Admin initialized");
+  } catch (error) {
+    console.error("❌ Firebase initialization error:", error);
+  }
 }
 
 const db = admin.firestore();
@@ -33,7 +40,7 @@ const razorpay = new Razorpay({
 
 // ---------------- WALLET APIs ----------------
 
-// Add money
+// Add money to wallet
 app.post("/wallet/add", async (req, res) => {
   try {
     const { userId, amount } = req.body;
@@ -65,7 +72,9 @@ app.post("/wallet/pay", async (req, res) => {
     const walletDoc = await walletRef.get();
 
     if (!walletDoc.exists || walletDoc.data().balance < amount) {
-      return res.status(400).json({ success: false, message: "Insufficient balance" });
+      return res
+        .status(400)
+        .json({ success: false, message: "Insufficient balance" });
     }
 
     await walletRef.update({
@@ -83,11 +92,19 @@ app.post("/wallet/pay", async (req, res) => {
   }
 });
 
-// Wallet history
+// Get wallet history
 app.get("/wallet/:userId", async (req, res) => {
   try {
-    const walletDoc = await db.collection("wallets").doc(req.params.userId).get();
-    res.json(walletDoc.exists ? walletDoc.data() : { balance: 0, transactions: [] });
+    const walletDoc = await db
+      .collection("wallets")
+      .doc(req.params.userId)
+      .get();
+
+    res.json(
+      walletDoc.exists
+        ? walletDoc.data()
+        : { balance: 0, transactions: [] }
+    );
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -117,7 +134,7 @@ app.post("/orders", async (req, res) => {
   }
 });
 
-// Update order
+// Update order status
 app.post("/orders/update", async (req, res) => {
   try {
     const { orderId, status } = req.body;
@@ -152,7 +169,7 @@ app.post("/orders/update", async (req, res) => {
 app.post("/order", async (req, res) => {
   try {
     const options = {
-      amount: req.body.amount * 100, // in paise
+      amount: req.body.amount * 100, // amount in paise
       currency: "INR",
       receipt: "receipt_" + Date.now(),
     };
@@ -190,4 +207,6 @@ app.post("/payment/verify", async (req, res) => {
 
 // ---------------- START SERVER ----------------
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`🚀 Backend running on port ${PORT}`));
+app.listen(PORT, () =>
+  console.log(`🚀 Backend running on port ${PORT}`)
+);
